@@ -113,3 +113,46 @@ func TestRateLimitWaitNilIsSafe(t *testing.T) {
 	}
 	b.resetRateLimit() // must not panic
 }
+
+func TestStreamLimitWaitGrowsAndCaps(t *testing.T) {
+	b := newDownloadBackoff(0)
+
+	want := []time.Duration{
+		defaultStreamWait,
+		2 * defaultStreamWait,
+		4 * defaultStreamWait,
+	}
+	for i, w := range want {
+		if got := b.streamLimitWait(); got != w {
+			t.Fatalf("hit %d: streamLimitWait() = %v, want %v", i, got, w)
+		}
+	}
+
+	// Keep hitting it until it should be capped.
+	var last time.Duration
+	for i := 0; i < 20; i++ {
+		last = b.streamLimitWait()
+	}
+	if last != maxStreamWait {
+		t.Fatalf("streamLimitWait() after many hits = %v, want cap %v", last, maxStreamWait)
+	}
+}
+
+func TestStreamLimitWaitResets(t *testing.T) {
+	b := newDownloadBackoff(0)
+	b.streamLimitWait()
+	b.streamLimitWait()
+	b.resetStreamLimit()
+
+	if got := b.streamLimitWait(); got != defaultStreamWait {
+		t.Fatalf("streamLimitWait() after reset = %v, want %v", got, defaultStreamWait)
+	}
+}
+
+func TestStreamLimitWaitNilIsSafe(t *testing.T) {
+	var b *downloadBackoff
+	if got := b.streamLimitWait(); got != defaultStreamWait {
+		t.Fatalf("nil backoff streamLimitWait() = %v, want %v", got, defaultStreamWait)
+	}
+	b.resetStreamLimit() // must not panic
+}

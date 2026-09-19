@@ -14,6 +14,13 @@ import (
 // any other playback failure and moving on.
 var ErrRateLimited = errors.New("rate limited by Crunchyroll")
 
+// ErrTooManyStreams marks a playback error caused by the account already having
+// as many concurrent streams as Crunchyroll allows. Every /playback request
+// counts as a stream until it is deleted, so requesting playback for several
+// dubs at once (or an interrupted run leaving one behind) trips this even when
+// nothing is actually playing.
+var ErrTooManyStreams = errors.New("too many active streams")
+
 // EpisodeError is the playback endpoint's polymorphic "error" field. It is a
 // string message on failure, but Crunchyroll also returns false, null or a bare
 // number when playback is fine, which a plain *string cannot unmarshal.
@@ -64,6 +71,23 @@ type Subtitle struct {
 	URL string `json:"url"`
 }
 
+// playbackError turns the playback endpoint's error field into a Go error,
+// tagging the two failures callers know how to recover from with sentinel
+// errors: 429-class rate limiting and the concurrent-stream limit. It is pure
+// so the classification can be tested without a live request.
+func playbackError(message EpisodeError, reason string) error {
+	if message == "" {
+		return nil
+	}
+	if strings.HasPrefix(string(message), "429") {
+		return fmt.Errorf("playback error: %s: %w", message, ErrRateLimited)
+	}
+	if strings.Contains(strings.ToUpper(string(message)), "TOO_MANY_ACTIVE_STREAMS") {
+		return fmt.Errorf("playback error: %s: %w", message, ErrTooManyStreams)
+	}
+	return fmt.Errorf("playback error: %s", message)
+}
+
 func getEpisode(id string) (Episode, error) {
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://www.crunchyroll.com/playback/v3/%s/web/firefox/play", id), nil)
 	if err != nil {
@@ -91,11 +115,12 @@ func getEpisode(id string) (Episode, error) {
 			fmt.Printf(" (%s)", episode.Reason)
 		}
 		fmt.Println()
-		if strings.HasPrefix(string(episode.Error), "429") {
+	}
+	if err := playbackError(episode.Error, episode.Reason); err != nil {
+		if errors.Is(err, ErrRateLimited) {
 			fmt.Println("Crunchyroll is rate-limiting this account. Wait a while before retrying, or use a different account.")
-			return Episode{}, fmt.Errorf("playback error: %s: %w", episode.Error, ErrRateLimited)
 		}
-		return Episode{}, fmt.Errorf("playback error: %s", episode.Error)
+		return Episode{}, err
 	}
 
 	if *debug {

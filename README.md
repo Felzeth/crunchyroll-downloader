@@ -156,6 +156,10 @@ If Crunchyroll rate-limits an episode anyway, it's retried in place (starting at
 
 ![](.github/screenshots/etp-rt-cookie.png)
 
+### Why do I get `TOO_MANY_ACTIVE_STREAMS`?
+
+Crunchyroll counts every playback request as one active stream, and an account is only allowed a few at once. The downloader opens, uses and closes a single stream at a time and retries on its own when the limit is hit, so this should be rare now. It still happens when something else is holding your allowance: stop playback in other browser tabs, in the Crunchyroll app, and on other devices. A run stopped with Ctrl+C is cleaned up too (its stream is released), but streams stranded by *older* versions keep counting until they expire — wait a few minutes, or space downloads out with `--download-delay`, and it clears.
+
 ### What is a `.wvd` file and do I really need one?
 
 Yes, Crunchyroll uses DRM-only content. This file is used to get a Widevine license, which gives the keys to decrypt the media.

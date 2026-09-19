@@ -181,6 +181,9 @@ func main() {
 
 	token = GetAccessToken(*etpRt)
 	backoff = newDownloadBackoff(*downloadDelay)
+	// Release the playback streams of an in-flight episode on Ctrl+C, so an
+	// interrupted run can't leave the account at its concurrent-stream limit.
+	handleInterrupt()
 
 	if *urlsFile != "" {
 		file, err := os.Open(*urlsFile)

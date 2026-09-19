@@ -19,6 +19,7 @@ type downloadBackoff struct {
 	started       bool
 	last          time.Time
 	rateLimitHits int
+	streamHits    int
 }
 
 // defaultRateLimitWait is the starting retry delay for a rate-limited episode
@@ -28,6 +29,14 @@ const defaultRateLimitWait = time.Minute
 // maxRateLimitWait caps rateLimitWait's exponential growth so a long streak of
 // consecutive rate-limit hits doesn't produce absurd delays.
 const maxRateLimitWait = 30 * time.Minute
+
+// defaultStreamWait is the starting retry delay for a playback request that hit
+// the account's concurrent-stream limit. A stream left behind by an interrupted
+// run usually expires within a couple of minutes, so this stays short.
+const defaultStreamWait = 10 * time.Second
+
+// maxStreamWait caps streamLimitWait's exponential growth.
+const maxStreamWait = time.Minute
 
 func newDownloadBackoff(delay time.Duration) *downloadBackoff {
 	return &downloadBackoff{delay: delay, now: time.Now, sleep: time.Sleep}
@@ -103,5 +112,39 @@ func (b *downloadBackoff) resetRateLimit() {
 	}
 	b.mu.Lock()
 	b.rateLimitHits = 0
+	b.mu.Unlock()
+}
+
+// streamLimitWait returns how long to wait before retrying a playback request
+// that Crunchyroll rejected because the account already had too many active
+// streams, doubling with each consecutive hit (since the last resetStreamLimit)
+// up to maxStreamWait. Safe to call on a nil backoff.
+func (b *downloadBackoff) streamLimitWait() time.Duration {
+	var hits int
+	if b != nil {
+		b.mu.Lock()
+		hits = b.streamHits
+		b.streamHits++
+		b.mu.Unlock()
+	}
+
+	wait := defaultStreamWait
+	for i := 0; i < hits && wait < maxStreamWait; i++ {
+		wait *= 2
+	}
+	if wait > maxStreamWait {
+		wait = maxStreamWait
+	}
+	return wait
+}
+
+// resetStreamLimit clears the consecutive stream-limit counter after a playback
+// request succeeds. Safe to call on a nil backoff.
+func (b *downloadBackoff) resetStreamLimit() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.streamHits = 0
 	b.mu.Unlock()
 }

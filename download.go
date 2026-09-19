@@ -562,12 +562,13 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	// already on disk (returned above) don't burn the wait for nothing.
 	backoff.wait()
 
-	// activeStreams tracks every playback token we open so we can release them
-	// all if anything fails partway through.
-	var (
-		streamsMu     sync.Mutex
-		activeStreams = map[string]string{}
-	)
+	// Playback streams are acquired one version at a time and released as soon
+	// as that version is finished with. Crunchyroll counts every open playback
+	// token against the account's concurrent-stream limit, so fetching all the
+	// dubs up front (which -subs-only did to discover per-dub captions) opened
+	// one stream per dub and tripped TOO_MANY_ACTIVE_STREAMS.
+	streams := newStreamTracker()
+	setCurrentStreams(streams)
 	defer func() {
 		// Start the backoff clock as soon as this download is over, success or
 		// not, so a failed/rate-limited attempt doesn't get retried immediately.
@@ -575,16 +576,9 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 
 		print("Cleaning up...\n")
 
-		streamsMu.Lock()
-		streams := activeStreams
-		activeStreams = map[string]string{}
-		streamsMu.Unlock()
+		streams.releaseAll()
+		setCurrentStreams(nil)
 
-		for id, sToken := range streams {
-			if err := deleteStream(id, sToken); err != nil {
-				fmt.Printf("Failed to remove the player stream for %s: %v\n", id, err)
-			}
-		}
 		if r := recover(); r != nil {
 			if e, ok := r.(error); ok {
 				err = e
@@ -599,27 +593,104 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		}
 	}()
 
-	// Fetch every version's playback up front so subtitle and caption
-	// availability can be validated against the union of all versions. Closed
-	// captions are per-audio-locale: a caption locale (e.g. the English dub's
-	// en-US captions) only appears on that version's playback, so the first
-	// version alone is not enough when multiple audio languages are requested.
-	episodes := make([]Episode, len(versions))
+	// Audio-only mode knows its track list up front; the other modes have to
+	// read a playback response before they can tell which subtitles exist.
+	if mode == modeAudioOnly {
+		fmt.Printf("Audio locales: %s\n", strings.Join(audioLangs, ", "))
+	}
+
+	// episodes holds the playback metadata of every version whose stream was
+	// read, so the subtitles and captions of all dubs can still be merged once
+	// the streams have been released.
+	var episodes []Episode
+	audioTracks := make([]mediaTrack, len(versions))
+	var videoFile string
+
 	for i, version := range versions {
-		ep, err := getEpisode(version.contentId)
+		// In audio-only mode a track already on disk needs no re-download.
+		if mode == modeAudioOnly {
+			target := filepath.Join(cleanSeriesTitle, seasonFolder, version.locale, baseName+"."+audioTrackExt)
+			if fileExists(target) {
+				fmt.Printf("Audio track %s is already downloaded, skipping...\n", trackTitle(version.locale))
+				continue
+			}
+		}
+
+		episode, err := acquirePlayback(version.contentId)
 		if err != nil {
 			panic(err)
 		}
-		episodes[i] = ep
-		streamsMu.Lock()
-		activeStreams[version.contentId] = ep.Token
-		streamsMu.Unlock()
+		streams.add(version.contentId, episode.Token)
+		episodes = append(episodes, episode)
+
+		if mode != modeSubsOnly {
+			manifest, body, err := parseManifest(episode.ManifestURL)
+			if err != nil {
+				panic(fmt.Errorf("parsing manifest for %s: %w", version.locale, err))
+			}
+			pssh := getPssh(manifest)
+			if pssh == nil {
+				panic(fmt.Errorf("PSSH not found for %s", version.locale))
+			}
+			keys, err := getLicense(*pssh, version.contentId, episode.Token)
+			if err != nil {
+				panic(fmt.Errorf("getLicense for %s: %w", version.locale, err))
+			}
+
+			var sets []onDemandAdaptationSet
+			if isOnDemand(manifest) {
+				if sets, err = parseOnDemand(body); err != nil {
+					panic(err)
+				}
+			}
+
+			if i == 0 && mode == modeFull {
+				// The video and the first audio track share this version's keys,
+				// so they download concurrently with each other.
+				type trackResult struct {
+					file string
+					err  error
+				}
+				videoCh := make(chan trackResult, 1)
+				go func() {
+					// The video track is the same for every dub, so its cache key
+					// uses the episode's base ID rather than the version's, keeping
+					// the key stable regardless of which audio languages are asked
+					// for.
+					file, err := downloadVideoTrack(manifest, sets, baseContentId, *videoQuality, keys)
+					videoCh <- trackResult{file, err}
+				}()
+
+				audioFile, err := downloadAudioTrack(manifest, sets, version.locale, version.contentId, *audioQuality, keys)
+				if err != nil {
+					// Join the video download before unwinding so its progress
+					// bar can't race the cleanup.
+					<-videoCh
+					panic(err)
+				}
+				audioTracks[i] = mediaTrack{file: audioFile, locale: version.locale}
+
+				video := <-videoCh
+				if video.err != nil {
+					panic(video.err)
+				}
+				videoFile = video.file
+			} else {
+				audioFile, err := downloadAudioTrack(manifest, sets, version.locale, version.contentId, *audioQuality, keys)
+				if err != nil {
+					panic(err)
+				}
+				audioTracks[i] = mediaTrack{file: audioFile, locale: version.locale}
+			}
+		}
+
+		// Free this version's stream before asking for the next one, so the
+		// account never has more than one playback open at a time.
+		streams.release(version.contentId)
 	}
 
 	var subJobs []subJob
-	if mode == modeAudioOnly {
-		fmt.Printf("Audio locales: %s\n", strings.Join(audioLangs, ", "))
-	} else {
+	if mode != modeAudioOnly {
 		// Merge subtitles and captions across versions. Subtitles (translation
 		// scripts) are usually identical across versions, while captions are the
 		// per-dub transcriptions that only exist on their own version.
@@ -667,12 +738,10 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		return downloadSubsOnly(cleanSeriesTitle, seasonFolder, baseName, subJobs)
 	}
 
-	// Download every subtitle, every audio dub and the video track concurrently.
-	// Each dub has its own playback token and license keys, so they no longer
-	// need to be serialized behind a single global key set.
+	// Subtitles are fetched from the CDN over their own URLs rather than through
+	// the playback stream, so they still download concurrently. Only the
+	// playback streams themselves are serialized.
 	subTracks := make([]mediaTrack, len(subJobs))
-	audioTracks := make([]mediaTrack, len(versions))
-	var videoFile string
 
 	var (
 		wg       sync.WaitGroup
@@ -698,100 +767,6 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 			}
 			subTracks[j] = mediaTrack{file: file, locale: job.locale, format: job.format, isCC: job.isCC}
 		}(j, job)
-	}
-
-	for i, version := range versions {
-		wg.Add(1)
-		go func(i int, version audioVersion) {
-			defer wg.Done()
-
-			// In audio-only mode a track already on disk needs no re-download.
-			if mode == modeAudioOnly {
-				target := filepath.Join(cleanSeriesTitle, seasonFolder, version.locale, baseName+"."+audioTrackExt)
-				if fileExists(target) {
-					fmt.Printf("Audio track %s is already downloaded, skipping...\n", trackTitle(version.locale))
-					return
-				}
-			}
-
-			episode := episodes[i]
-
-			manifest, body, err := parseManifest(episode.ManifestURL)
-			if err != nil {
-				fail(fmt.Errorf("parsing manifest for %s: %w", version.locale, err))
-				return
-			}
-			pssh := getPssh(manifest)
-			if pssh == nil {
-				fail(fmt.Errorf("PSSH not found for %s", version.locale))
-				return
-			}
-			keys, err := getLicense(*pssh, version.contentId, episode.Token)
-			if err != nil {
-				fail(fmt.Errorf("getLicense for %s: %w", version.locale, err))
-				return
-			}
-
-			var sets []onDemandAdaptationSet
-			if isOnDemand(manifest) {
-				var err error
-				sets, err = parseOnDemand(body)
-				if err != nil {
-					fail(err)
-					return
-				}
-			}
-
-			if i == 0 && mode == modeFull {
-				// The video and the first audio track share this version's keys,
-				// so they download concurrently with each other and everything
-				// else.
-				type trackResult struct {
-					file string
-					err  error
-				}
-				videoCh := make(chan trackResult, 1)
-				go func() {
-					// The video track is the same for every dub, so its cache key
-					// uses the episode's base ID rather than the version's, keeping
-					// the key stable regardless of which audio languages are asked
-					// for.
-					file, err := downloadVideoTrack(manifest, sets, baseContentId, *videoQuality, keys)
-					videoCh <- trackResult{file, err}
-				}()
-
-				audioFile, err := downloadAudioTrack(manifest, sets, version.locale, version.contentId, *audioQuality, keys)
-				if err != nil {
-					// Join the video download before unwinding so its progress
-					// bar can't race the deferred cleanup.
-					<-videoCh
-					fail(err)
-					return
-				}
-				audioTracks[i] = mediaTrack{file: audioFile, locale: version.locale}
-
-				video := <-videoCh
-				if video.err != nil {
-					fail(video.err)
-					return
-				}
-				videoFile = video.file
-			} else {
-				audioFile, err := downloadAudioTrack(manifest, sets, version.locale, version.contentId, *audioQuality, keys)
-				if err != nil {
-					fail(err)
-					return
-				}
-				audioTracks[i] = mediaTrack{file: audioFile, locale: version.locale}
-			}
-
-			if err := deleteStream(version.contentId, episode.Token); err != nil {
-				fmt.Printf("Failed to remove the player stream for %s: %v\n", version.locale, err)
-			}
-			streamsMu.Lock()
-			delete(activeStreams, version.contentId)
-			streamsMu.Unlock()
-		}(i, version)
 	}
 
 	wg.Wait()

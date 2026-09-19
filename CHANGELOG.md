@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.1
+
+- Fixed `TOO_MANY_ACTIVE_STREAMS` failures: every playback request counts as an active stream, and the previous code requested playback for all of an episode's dubs up front and held those tokens until the episode finished, so a multi-language download (notably `--subs-only`, which inspects every dub to find per-dub captions) exceeded the account's concurrent-stream limit. Playback streams are now acquired, used and released one version at a time
+- `TOO_MANY_ACTIVE_STREAMS` is now retried with a growing delay (10s doubling to 1 minute, up to 5 attempts) instead of aborting the episode, so a stream stranded by an earlier run no longer blocks the download
+- Playback streams are now released when the program is interrupted with Ctrl+C, instead of being left registered on the account until they time out
+
 ## 1.6.0
 
 - Added `--all-audio-subs` to download every available audio language together with every available subtitle and closed caption in a single file
