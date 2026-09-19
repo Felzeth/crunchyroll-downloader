@@ -31,7 +31,9 @@ You won't be banned or anything, I downloaded all Kaguya-Sama seasons to test du
 
 ## Download
 
-Check the [latest release](https://github.com/CuteTenshii/crunchyroll-downloader/releases/latest) and download the file that corresponds to your OS.
+Check the [Tenshii latest release](https://github.com/CuteTenshii/crunchyroll-downloader/releases/latest) and download the file that corresponds to your OS.
+
+Check this [Fork release](https://github.com/felzeth/crunchyroll-downloader/release/latest) to have more additional features.
 
 ## Usage
 
