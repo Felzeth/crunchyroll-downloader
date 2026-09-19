@@ -20,6 +20,68 @@ import (
 
 const maxWorkers = 10
 
+// episodeMode selects what a download writes: the usual merged MKV, or only
+// audio/subtitles as per-language sidecar files.
+type episodeMode int
+
+const (
+	modeFull episodeMode = iota
+	modeAudioOnly
+	modeSubsOnly
+)
+
+// audioTrackExt is the extension used for the per-language audio files that
+// -audio-only writes. The decrypted track is a fragmented MP4 carrying AAC.
+const audioTrackExt = "m4a"
+
+// currentMode reports the output mode selected by the command-line flags.
+func currentMode() episodeMode {
+	switch {
+	case *audioOnly:
+		return modeAudioOnly
+	case *subsOnly:
+		return modeSubsOnly
+	default:
+		return modeFull
+	}
+}
+
+// seasonFolderName returns the per-season subdirectory used by -audio-only and
+// -subs-only output, e.g. "Season 01".
+func seasonFolderName(season int) string {
+	return fmt.Sprintf("Season %02d", season)
+}
+
+// episodeBaseName is the "S01E01 - Title" stem shared by the merged MKV and by
+// the per-language files written in -audio-only/-subs-only mode.
+func episodeBaseName(info EpisodeInfo) string {
+	return fmt.Sprintf("S%02dE%02d - %s",
+		info.EpisodeMetadata.SeasonNumber,
+		info.EpisodeMetadata.EpisodeNumber,
+		sanitizeFilename(info.Title),
+	)
+}
+
+// sidecarDir returns (and creates) the per-language output folder used by the
+// audio-only and subtitles-only modes: series/Season NN/<locale>.
+func sidecarDir(series, seasonFolder, locale string) (string, error) {
+	dir := filepath.Join(series, seasonFolder, locale)
+	if err := os.MkdirAll(dir, 0777); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// sidecarName builds the file name for one track in its per-language folder,
+// tagging closed captions so they can't collide with a same-format subtitle.
+func sidecarName(baseName, ext string, isCC bool) string {
+	suffix := ""
+	if isCC {
+		suffix = " [CC]"
+	}
+	return baseName + suffix + "." + ext
+}
+
 func buildUrl(base, representationId, file string, partNum *int64) string {
 	if partNum != nil {
 		file = strings.ReplaceAll(file, "$Number$", fmt.Sprintf("%05d", *partNum))
@@ -269,49 +331,82 @@ func downloadParts(title string, baseUrl, representationId *string, set *mpd.Ada
 }
 
 // downloadAudioTrack downloads a version's audio representation into a temporary
-// file. sets is non-nil only for on-demand manifests.
-func downloadAudioTrack(manifest *mpd.MPD, sets []onDemandAdaptationSet, locale, quality string, keys []*widevine.Key) (string, error) {
+// file. sets is non-nil only for on-demand manifests. When caching is enabled a
+// previously downloaded copy is returned instead of re-fetching the segments.
+func downloadAudioTrack(manifest *mpd.MPD, sets []onDemandAdaptationSet, locale, contentId, quality string, keys []*widevine.Key) (string, error) {
+	if cached := lookupCachedTrack("audio", contentId, quality); cached != "" {
+		fmt.Printf("Using cached %s audio\n", trackTitle(locale))
+		return cached, nil
+	}
+
 	title := "Downloading " + trackTitle(locale) + " audio"
+	var file string
+	var err error
 	if isOnDemand(manifest) {
-		return downloadOnDemandAdaptation(title, sets, false, quality, keys)
+		file, err = downloadOnDemandAdaptation(title, sets, false, quality, keys)
+	} else {
+		audioSet := manifest.Period[0].AdaptationSets[1]
+		audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, quality)
+		if audioBaseUrl == nil {
+			return "", fmt.Errorf("failed to get the audio base URL for %s, maybe the audio quality you entered is wrong?", locale)
+		}
+		file, err = downloadParts(title, audioBaseUrl, audioRepresentationId, audioSet, keys)
 	}
-	audioSet := manifest.Period[0].AdaptationSets[1]
-	audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, quality)
-	if audioBaseUrl == nil {
-		return "", fmt.Errorf("failed to get the audio base URL for %s, maybe the audio quality you entered is wrong?", locale)
+	if err != nil {
+		return "", err
 	}
-	return downloadParts(title, audioBaseUrl, audioRepresentationId, audioSet, keys)
+	storeCachedTrack("audio", contentId, quality, file)
+	return file, nil
 }
 
 // downloadVideoTrack downloads the video representation into a temporary file.
-// The video track is identical across dubs, so it is downloaded only once.
-func downloadVideoTrack(manifest *mpd.MPD, sets []onDemandAdaptationSet, quality string, keys []*widevine.Key) (string, error) {
-	if isOnDemand(manifest) {
-		return downloadOnDemandAdaptation("Downloading video", sets, true, quality, keys)
+// The video track is identical across dubs, so it is downloaded only once. When
+// caching is enabled a previously downloaded copy is reused.
+func downloadVideoTrack(manifest *mpd.MPD, sets []onDemandAdaptationSet, contentId, quality string, keys []*widevine.Key) (string, error) {
+	if cached := lookupCachedTrack("video", contentId, quality); cached != "" {
+		fmt.Println("Using cached video")
+		return cached, nil
 	}
-	videoSet := manifest.Period[0].AdaptationSets[0]
-	baseUrl, representationId := getBaseUrl(videoSet, true, quality)
-	if baseUrl == nil {
-		return "", fmt.Errorf("failed to get the video base URL, maybe the video quality you entered is wrong?")
-	}
-	return downloadParts("Downloading video", baseUrl, representationId, videoSet, keys)
-}
 
-func downloadSubs(url, format string) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	var file string
+	var err error
+	if isOnDemand(manifest) {
+		file, err = downloadOnDemandAdaptation("Downloading video", sets, true, quality, keys)
+	} else {
+		videoSet := manifest.Period[0].AdaptationSets[0]
+		baseUrl, representationId := getBaseUrl(videoSet, true, quality)
+		if baseUrl == nil {
+			return "", fmt.Errorf("failed to get the video base URL, maybe the video quality you entered is wrong?")
+		}
+		file, err = downloadParts("Downloading video", baseUrl, representationId, videoSet, keys)
+	}
 	if err != nil {
 		return "", err
+	}
+	storeCachedTrack("video", contentId, quality, file)
+	return file, nil
+}
+
+// fetchSubtitle downloads a subtitle/caption file and returns its raw bytes.
+func fetchSubtitle(url string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
 	}
 	req.Header.Set("Origin", "https://static.crunchyroll.com")
 	req.Header.Set("Referer", "https://static.crunchyroll.com/")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
+}
+
+func downloadSubs(url, format string) (string, error) {
+	body, err := fetchSubtitle(url)
 	if err != nil {
 		return "", err
 	}
@@ -387,6 +482,14 @@ func filterAvailableLangs(langs []string, available map[string]*Subtitle, kind s
 }
 
 func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLangs, ccLangs []string, videoQuality, audioQuality *string) (err error) {
+	mode := currentMode()
+
+	// Subtitles-only mode downloads no audio, so it looks at every dub version
+	// to discover all subtitle and caption locales.
+	if mode == modeSubsOnly {
+		audioLangs = []string{"all"}
+	}
+
 	cleanSeriesTitle := sanitizeFilename(info.EpisodeMetadata.SeriesTitle)
 	cleanEpisodeTitle := sanitizeFilename(info.Title)
 
@@ -394,17 +497,23 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		_ = os.MkdirAll(cleanSeriesTitle, 0777)
 	}
 
-	outputFile := filepath.Join(cleanSeriesTitle, fmt.Sprintf("%s S%02dE%02d - %s [%s].mkv",
-		cleanSeriesTitle,
-		info.EpisodeMetadata.SeasonNumber,
-		info.EpisodeMetadata.EpisodeNumber,
-		cleanEpisodeTitle,
-		*videoQuality,
-	))
+	baseName := episodeBaseName(info)
+	seasonFolder := seasonFolderName(info.EpisodeMetadata.SeasonNumber)
 
-	if _, statErr := os.Stat(outputFile); statErr == nil {
-		fmt.Printf("Episode %v is already downloaded, skipping...\n", info.EpisodeMetadata.EpisodeNumber)
-		return
+	outputFile := ""
+	if mode == modeFull {
+		outputFile = filepath.Join(cleanSeriesTitle, fmt.Sprintf("%s S%02dE%02d - %s [%s].mkv",
+			cleanSeriesTitle,
+			info.EpisodeMetadata.SeasonNumber,
+			info.EpisodeMetadata.EpisodeNumber,
+			cleanEpisodeTitle,
+			*videoQuality,
+		))
+
+		if _, statErr := os.Stat(outputFile); statErr == nil {
+			fmt.Printf("Episode %v is already downloaded, skipping...\n", info.EpisodeMetadata.EpisodeNumber)
+			return
+		}
 	}
 
 	// Resolve each requested audio locale to its version GUID. Each dub is a
@@ -507,51 +616,55 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		streamsMu.Unlock()
 	}
 
-	// Merge subtitles and captions across versions. Subtitles (translation
-	// scripts) are usually identical across versions, while captions are the
-	// per-dub transcriptions that only exist on their own version.
-	subtitles, captions := mergeSubtitleAndCaptions(episodes)
-
-	if len(subsLangs) == 1 && subsLangs[0] == "all" {
-		subsLangs = make([]string, 0, len(subtitles))
-		for locale, sub := range subtitles {
-			if sub != nil && sub.URL != "" {
-				subsLangs = append(subsLangs, locale)
-			}
-		}
-		sort.Strings(subsLangs)
-	}
-	if len(ccLangs) == 1 && ccLangs[0] == "all" {
-		ccLangs = make([]string, 0, len(captions))
-		for locale, cc := range captions {
-			if cc != nil && cc.URL != "" {
-				ccLangs = append(ccLangs, locale)
-			}
-		}
-		sort.Strings(ccLangs)
-	}
-
-	fmt.Printf("Audio locales: %s | Subtitle locales: %s | CC locales: %s\n",
-		strings.Join(audioLangs, ", "), strings.Join(subsLangs, ", "), strings.Join(ccLangs, ", "))
-
-	subsLangs = filterAvailableLangs(subsLangs, subtitles, "Subtitle", info.EpisodeMetadata.EpisodeNumber)
-	ccLangs = filterAvailableLangs(ccLangs, captions, "Closed caption", info.EpisodeMetadata.EpisodeNumber)
-
-	// Build the list of subtitle and caption downloads.
-	type subJob struct {
-		url    string
-		format string
-		locale string
-		isCC   bool
-	}
 	var subJobs []subJob
-	for _, locale := range subsLangs {
-		sub := subtitles[locale]
-		subJobs = append(subJobs, subJob{url: sub.URL, format: sub.Format, locale: locale})
+	if mode == modeAudioOnly {
+		fmt.Printf("Audio locales: %s\n", strings.Join(audioLangs, ", "))
+	} else {
+		// Merge subtitles and captions across versions. Subtitles (translation
+		// scripts) are usually identical across versions, while captions are the
+		// per-dub transcriptions that only exist on their own version.
+		subtitles, captions := mergeSubtitleAndCaptions(episodes)
+
+		if len(subsLangs) == 1 && subsLangs[0] == "all" {
+			subsLangs = make([]string, 0, len(subtitles))
+			for locale, sub := range subtitles {
+				if sub != nil && sub.URL != "" {
+					subsLangs = append(subsLangs, locale)
+				}
+			}
+			sort.Strings(subsLangs)
+		}
+		if len(ccLangs) == 1 && ccLangs[0] == "all" {
+			ccLangs = make([]string, 0, len(captions))
+			for locale, cc := range captions {
+				if cc != nil && cc.URL != "" {
+					ccLangs = append(ccLangs, locale)
+				}
+			}
+			sort.Strings(ccLangs)
+		}
+
+		fmt.Printf("Audio locales: %s | Subtitle locales: %s | CC locales: %s\n",
+			strings.Join(audioLangs, ", "), strings.Join(subsLangs, ", "), strings.Join(ccLangs, ", "))
+
+		subsLangs = filterAvailableLangs(subsLangs, subtitles, "Subtitle", info.EpisodeMetadata.EpisodeNumber)
+		ccLangs = filterAvailableLangs(ccLangs, captions, "Closed caption", info.EpisodeMetadata.EpisodeNumber)
+
+		// Build the list of subtitle and caption downloads.
+		for _, locale := range subsLangs {
+			sub := subtitles[locale]
+			subJobs = append(subJobs, subJob{url: sub.URL, format: sub.Format, locale: locale})
+		}
+		for _, locale := range ccLangs {
+			cc := captions[locale]
+			subJobs = append(subJobs, subJob{url: cc.URL, format: cc.Format, locale: locale, isCC: true})
+		}
 	}
-	for _, locale := range ccLangs {
-		cc := captions[locale]
-		subJobs = append(subJobs, subJob{url: cc.URL, format: cc.Format, locale: locale, isCC: true})
+
+	// Subtitles-only mode writes each file straight into its per-language
+	// folder and never touches the video or audio streams.
+	if mode == modeSubsOnly {
+		return downloadSubsOnly(cleanSeriesTitle, seasonFolder, baseName, subJobs)
 	}
 
 	// Download every subtitle, every audio dub and the video track concurrently.
@@ -592,6 +705,15 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		go func(i int, version audioVersion) {
 			defer wg.Done()
 
+			// In audio-only mode a track already on disk needs no re-download.
+			if mode == modeAudioOnly {
+				target := filepath.Join(cleanSeriesTitle, seasonFolder, version.locale, baseName+"."+audioTrackExt)
+				if fileExists(target) {
+					fmt.Printf("Audio track %s is already downloaded, skipping...\n", trackTitle(version.locale))
+					return
+				}
+			}
+
 			episode := episodes[i]
 
 			manifest, body, err := parseManifest(episode.ManifestURL)
@@ -620,7 +742,7 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 				}
 			}
 
-			if i == 0 {
+			if i == 0 && mode == modeFull {
 				// The video and the first audio track share this version's keys,
 				// so they download concurrently with each other and everything
 				// else.
@@ -630,11 +752,15 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 				}
 				videoCh := make(chan trackResult, 1)
 				go func() {
-					file, err := downloadVideoTrack(manifest, sets, *videoQuality, keys)
+					// The video track is the same for every dub, so its cache key
+					// uses the episode's base ID rather than the version's, keeping
+					// the key stable regardless of which audio languages are asked
+					// for.
+					file, err := downloadVideoTrack(manifest, sets, baseContentId, *videoQuality, keys)
 					videoCh <- trackResult{file, err}
 				}()
 
-				audioFile, err := downloadAudioTrack(manifest, sets, version.locale, *audioQuality, keys)
+				audioFile, err := downloadAudioTrack(manifest, sets, version.locale, version.contentId, *audioQuality, keys)
 				if err != nil {
 					// Join the video download before unwinding so its progress
 					// bar can't race the deferred cleanup.
@@ -651,7 +777,7 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 				}
 				videoFile = video.file
 			} else {
-				audioFile, err := downloadAudioTrack(manifest, sets, version.locale, *audioQuality, keys)
+				audioFile, err := downloadAudioTrack(manifest, sets, version.locale, version.contentId, *audioQuality, keys)
 				if err != nil {
 					fail(err)
 					return
@@ -672,11 +798,63 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	if firstErr != nil {
 		panic(firstErr)
 	}
+
+	// Audio-only mode writes each language's track to its own folder instead of
+	// merging, so no video or subtitle streams are involved.
+	if mode == modeAudioOnly {
+		for _, track := range audioTracks {
+			if track.file == "" {
+				continue // skipped above: already on disk
+			}
+			if _, err := sidecarDir(cleanSeriesTitle, seasonFolder, track.locale); err != nil {
+				panic(err)
+			}
+			target := filepath.Join(cleanSeriesTitle, seasonFolder, track.locale, baseName+"."+audioTrackExt)
+			if err := moveFile(track.file, target); err != nil {
+				panic(fmt.Errorf("writing %s: %w", target, err))
+			}
+			fmt.Printf("Saved %s audio to %s\n", trackTitle(track.locale), target)
+		}
+		fmt.Println("Audio download finished!")
+		return nil
+	}
+
 	if len(subTracks) > 0 {
 		fmt.Println("Downloaded subtitles!")
 	}
 
 	mergeEverything(videoFile, audioTracks, subTracks, outputFile, info)
+	return nil
+}
+
+// downloadSubsOnly writes each subtitle/caption file straight into its
+// per-language folder: <series>/<season>/<locale>/<SxxEyy - Title>.<format>.
+func downloadSubsOnly(series, seasonFolder, baseName string, jobs []subJob) error {
+	for _, job := range jobs {
+		kind := "Subtitle"
+		if job.isCC {
+			kind = "Closed caption"
+		}
+		dir, err := sidecarDir(series, seasonFolder, job.locale)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dir, sidecarName(baseName, job.format, job.isCC))
+		if fileExists(target) {
+			fmt.Printf("%s %s is already downloaded, skipping...\n", kind, trackTitle(job.locale))
+			continue
+		}
+
+		body, err := fetchSubtitle(job.url)
+		if err != nil {
+			return fmt.Errorf("downloading %s for %s: %w", strings.ToLower(kind), trackTitle(job.locale), err)
+		}
+		if err := os.WriteFile(target, body, 0666); err != nil {
+			return fmt.Errorf("writing %s: %w", target, err)
+		}
+		fmt.Printf("Saved %s %s to %s\n", trackTitle(job.locale), strings.ToLower(kind), target)
+	}
+	fmt.Println("Subtitle download finished!")
 	return nil
 }
 

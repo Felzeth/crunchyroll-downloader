@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.0
+
+- Added `--all-audio-subs` to download every available audio language together with every available subtitle and closed caption in a single file
+- Added `--audio-only` to save just the audio tracks, one file per language under `<series>/<season>/<locale>/`
+- Added `--subs-only` to save just the subtitles and closed captions, one file per language under `<series>/<season>/<locale>/`
+- Added `--cache` to reuse decrypted video and audio tracks between runs so re-running an episode doesn't download them again
+- `--sub-only` is accepted as a hidden alias for `--subs-only` (both the `-` and `--` forms)
+- Fixed `--subs-lang all` / `--audio-lang all` sending the `all` keyword to the series/season listing API as if it were a locale; the flag help and README now document `all` for `--subs-lang`, `--cc-lang` and `--audio-lang`
+
 ## 1.5.1
 
 - Audio dubs, subtitles, closed captions and the video track now download concurrently instead of one after another, making multi-language downloads much faster

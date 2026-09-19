@@ -15,6 +15,14 @@ type mediaTrack struct {
 	isCC   bool   // true if this track is a closed caption rather than a regular subtitle
 }
 
+// subJob describes one subtitle or caption file to download for an episode.
+type subJob struct {
+	url    string
+	format string
+	locale string
+	isCC   bool
+}
+
 // trackTitle returns a human-readable track name for a locale, falling back to
 // the raw locale when it isn't in the known list.
 func trackTitle(locale string) string {

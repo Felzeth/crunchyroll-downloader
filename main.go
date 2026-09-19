@@ -10,21 +10,68 @@ import (
 
 var (
 	token         = ""
-	audioLang     = flag.String("audio-lang", "ja-JP", "Audio language(s), comma-separated for multiple (e.g. \"ja-JP,en-US\"). First is the default track")
-	subtitlesLang = flag.String("subs-lang", "en-US", "Subtitle language(s), comma-separated for multiple (e.g. \"en-US,es-419\"). First is the default track")
-	ccLang        = flag.String("cc-lang", "", "Closed caption language(s), comma-separated for multiple (e.g. \"en-US\"). Downloaded in addition to --subs-lang, not instead of it")
+	audioLang     = flag.String("audio-lang", "ja-JP", "Audio language(s), comma-separated for multiple (e.g. \"ja-JP,en-US\") or \"all\" for every available language. First is the default track")
+	subtitlesLang = flag.String("subs-lang", "en-US", "Subtitle language(s), comma-separated for multiple (e.g. \"en-US,es-419\") or \"all\" for every available subtitle. First is the default track")
+	ccLang        = flag.String("cc-lang", "", "Closed caption language(s), comma-separated for multiple (e.g. \"en-US\") or \"all\" for every available caption. Downloaded in addition to --subs-lang, not instead of it")
 	videoQuality  = flag.String("video-quality", "1080p", "Video quality")
 	audioQuality  = flag.String("audio-quality", "192k", "Audio quality")
 	seasonNumber  = flag.Int("season", 0, "Season number. Not used if an episode link is entered")
 	etpRt         = flag.String("etp-rt", "", "The \"etp_rt\" cookie value of your account")
 	debug         = flag.Bool("debug-manifest", false, "Log raw episode playback JSON and manifest XML")
 	downloadDelay = flag.Duration("download-delay", 0, "Minimum delay between episode downloads, to help avoid Crunchyroll's rate limiting (e.g. \"30s\", \"2m\")")
+	allAudioSubs  = flag.Bool("all-audio-subs", false, "Download every available audio language together with every available subtitle and closed caption")
+	audioOnly     = flag.Bool("audio-only", false, "Download audio only (no video or subtitles), one file per language in its own folder")
+	subsOnly      = flag.Bool("subs-only", false, "Download subtitles only (no video or audio), one file per language in its own folder")
+	enableCache   = flag.Bool("cache", false, "Cache decrypted video and audio tracks so re-running an episode doesn't download them again")
 )
 
 // backoff spaces out consecutive episode downloads by *downloadDelay. It is
 // initialized in main() once flags are parsed, and is a no-op (including when
 // left nil) whenever no delay is configured.
 var backoff *downloadBackoff
+
+// flagAliases maps alternate flag spellings to their canonical name. They are
+// resolved by normalizeArgs before flag.Parse, so aliases never show up in the
+// -h usage output.
+var flagAliases = map[string]string{
+	"sub-only": "subs-only",
+}
+
+// normalizeArgs rewrites alias flags to their canonical spelling before
+// flag.Parse sees them. Both the "-name" and "--name" forms are handled, with
+// or without an "=value" suffix. Arguments after a bare "--" are left alone,
+// since those are positional by convention.
+func normalizeArgs(args []string) {
+	for i, arg := range args {
+		if arg == "--" {
+			return
+		}
+		if len(arg) == 0 || arg[0] != '-' {
+			continue
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		canonical, ok := flagAliases[name]
+		if !ok {
+			continue
+		}
+		if hasValue {
+			args[i] = "--" + canonical + "=" + value
+		} else {
+			args[i] = "--" + canonical
+		}
+	}
+}
+
+// primaryLocale returns the first requested locale, substituting fallback when
+// the list is empty or selects every language. "all" is a downloader keyword,
+// not a real locale, so it must never be sent to the listing API (which still
+// returns every dub version per episode, keeping the other locales resolvable).
+func primaryLocale(langs []string, fallback string) string {
+	if len(langs) == 0 || langs[0] == "all" {
+		return fallback
+	}
+	return langs[0]
+}
 
 // parseLangs splits a comma-separated locale list, trimming spaces and dropping
 // empties.
@@ -58,6 +105,11 @@ func processUrl(url string) {
 		return
 	}
 
+	if *audioOnly && *subsOnly {
+		fmt.Println("-audio-only and -subs-only cannot be used together.")
+		return
+	}
+
 	audioLangs := parseLangs(*audioLang)
 	if len(audioLangs) == 0 {
 		audioLangs = []string{"ja-JP"}
@@ -65,14 +117,18 @@ func processUrl(url string) {
 	subsLangs := parseLangs(*subtitlesLang)
 	ccLangs := parseLangs(*ccLang)
 
+	// -all-audio-subs is shorthand for grabbing everything Crunchyroll offers.
+	if *allAudioSubs {
+		audioLangs = []string{"all"}
+		subsLangs = []string{"all"}
+		ccLangs = []string{"all"}
+	}
+
 	// The season/series API endpoints take a single preferred locale; use the
 	// primary (first) requested one. All dub versions are still listed per
 	// episode, so the other languages remain resolvable.
-	primaryAudio := audioLangs[0]
-	primarySubs := "en-US"
-	if len(subsLangs) > 0 {
-		primarySubs = subsLangs[0]
-	}
+	primaryAudio := primaryLocale(audioLangs, "ja-JP")
+	primarySubs := primaryLocale(subsLangs, "en-US")
 
 	if contentType == "watch" {
 		info := getEpisodeInfo(contentId)
@@ -109,6 +165,8 @@ func processUrl(url string) {
 func main() {
 	url := flag.String("url", "", "URL of the episode/season to download")
 	urlsFile := flag.String("file", "", "Path to a text file with one URL per line")
+	// Resolve hidden flag aliases (e.g. -sub-only -> -subs-only) first.
+	normalizeArgs(os.Args)
 	flag.Parse()
 
 	if *url == "" && *urlsFile == "" {
