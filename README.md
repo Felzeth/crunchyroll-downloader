@@ -39,6 +39,7 @@ Check this [Fork release](https://github.com/felzeth/crunchyroll-downloader/rele
 
 - Open a Terminal/Command prompt, and go to the folder where you downloaded the binary/cloned the repo
 - Run the program with the options you want:
+
 ```shell
 Usage of ./crunchyroll-downloader:
   -all-audio-subs
@@ -77,61 +78,86 @@ Usage of ./crunchyroll-downloader:
 
 A few flags accept a hidden alternate spelling. Aliases are never listed in `-h`, and both the single-dash and double-dash forms are accepted, with or without a value (`-sub-only`, `--sub-only`, `--sub-only=true`):
 
-| Alias | Equivalent to |
-| --- | --- |
-| `-sub-only` | `-subs-only` |
+| Alias       | Equivalent to |
+| ----------- | ------------- |
+| `-sub-only` | `-subs-only`  |
 
-Ex: to download the first season of *Hell's Paradise*:
+Ex: to download the first season of _Hell's Paradise_:
+
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise --season 1 --etp-rt replace_this
 ```
 
 To download a specific episode:
+
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/watch/GE00198973JAJP/dawn-and-confusion --etp-rt replace_this
 ```
 
 To batch download from a file (one URL per line):
+
 ```shell
 ./crunchyroll-downloader --file list.txt --etp-rt replace_this --subs-lang pt-BR
 ```
 
 To download multiple audio tracks and subtitles into a single file (the first of each is set as the default track). If any requested language is missing for an episode, that episode is skipped:
+
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/watch/GE00198973JAJP/dawn-and-confusion --etp-rt replace_this --audio-lang ja-JP,en-US --subs-lang en-US,es-419,de-DE
 ```
 
 To download every available subtitle, pass `all` to `--subs-lang` (`--cc-lang all` does the same for closed captions):
+
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise --season 1 --etp-rt replace_this --subs-lang all
 ```
 
 If you're getting rate-limited while downloading a season/batch, wait at least this long between each episode:
+
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise --season 1 --etp-rt replace_this --download-delay 30s
 ```
 
 To download every audio language together with every subtitle and closed caption in a single file:
+
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/watch/GE00198973JAJP/dawn-and-confusion --etp-rt replace_this --all-audio-subs
 ```
 
-To save only the audio, one file per language (each language gets its own folder, e.g. `Hell's Paradise/Season 01/ja-JP/`):
+To save only the audio, one file per language:
+
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise --season 1 --etp-rt replace_this --audio-only --all-audio-subs
 ```
 
-To save only the subtitles, one file per language, in the same folder layout:
+To save only the subtitles, one file per language:
+
 ```shell
-./crunchyroll-downloader --url https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise --season 1 --etp-rt replace_this --subs-only --all-audio-subs
+./crunchyroll-downloader --url https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise --season 1 --etp-rt replace_this --subs-only --subs-lang th-TH
 ```
 
+`--audio-only` and `--subs-only` choose their output layout from how languages are requested. Subtitle files are named `<series title> SxxEyy - <episode title>` and closed captions (WebVTT) are converted to `.srt`; translation scripts stay `.ass`:
+
+| Languages requested | Layout | Example |
+| --- | --- | --- |
+| Specific languages | Flat in the series folder; the locale is appended to the file name only when 2+ languages are requested | `Kaiju No. 8/S02E01 - The Man Who Became a Kaiju.ass`, or `Kaiju No. 8/S02E01 - The Man Who Became a Kaiju.th-TH.ass` for `--subs-lang th-TH,en-US` |
+| `all` | One folder per language under the season folder | `Kaiju No. 8/S02/th-TH/S02E01 - The Man Who Became a Kaiju.ass` |
+
 To reuse decrypted video and audio tracks between runs (e.g. re-downloading an episode with different subtitles), add `--cache`. Cached tracks are stored in your OS cache directory (`%LocalAppData%\crunchyroll-downloader` on Windows, `~/.cache/crunchyroll-downloader` on Linux):
+
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/watch/GE00198973JAJP/dawn-and-confusion --etp-rt replace_this --cache
 ```
 
 If Crunchyroll rate-limits an episode anyway, it's retried in place (starting at `-download-delay`, or 1 minute if unset, doubling up to 30 minutes on repeated hits) instead of moving on to the next episode and tripping the same limit again.
+
+### How do I fix audio and video being out of sync?
+
+Use FFmpeg to create a corrected copy. Replace the input and output filenames, and adjust `-itsoffset` to match the required timing offset:
+
+```shell
+ffmpeg -i "REPLACE_WITH_YOUR.mkv" -itsoffset -8.889 -i "REPLACE_WITH_YOUR.mkv" -map 1:v:0 -map 0:a:0 -c:v copy -c:a copy -shortest "YOUR_NEW_FILES_NAME.mkv"
+```
 
 ## Building
 
@@ -151,14 +177,14 @@ If Crunchyroll rate-limits an episode anyway, it's retried in place (starting at
 
 - Go to https://crunchyroll.com
 - Open Developer Tools
-- Firefox: Go to *Storage* then *Cookies*<br />Chrome: Go to *Application* then *Cookies*
+- Firefox: Go to _Storage_ then _Cookies_<br />Chrome: Go to _Application_ then _Cookies_
 - Select the Crunchyroll domain, then copy the `etp_rt` cookie value
 
 ![](.github/screenshots/etp-rt-cookie.png)
 
 ### Why do I get `TOO_MANY_ACTIVE_STREAMS`?
 
-Crunchyroll counts every playback request as one active stream, and an account is only allowed a few at once. The downloader opens, uses and closes a single stream at a time and retries on its own when the limit is hit, so this should be rare now. It still happens when something else is holding your allowance: stop playback in other browser tabs, in the Crunchyroll app, and on other devices. A run stopped with Ctrl+C is cleaned up too (its stream is released), but streams stranded by *older* versions keep counting until they expire — wait a few minutes, or space downloads out with `--download-delay`, and it clears.
+Crunchyroll counts every playback request as one active stream, and an account is only allowed a few at once. The downloader opens, uses and closes a single stream at a time and retries on its own when the limit is hit, so this should be rare now. It still happens when something else is holding your allowance: stop playback in other browser tabs, in the Crunchyroll app, and on other devices. A run stopped with Ctrl+C is cleaned up too (its stream is released), but streams stranded by _older_ versions keep counting until they expire — wait a few minutes, or space downloads out with `--download-delay`, and it clears.
 
 ### What is a `.wvd` file and do I really need one?
 

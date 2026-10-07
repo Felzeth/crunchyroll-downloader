@@ -8,10 +8,10 @@ import (
 
 func TestSeasonFolderName(t *testing.T) {
 	cases := map[int]string{
-		0:   "Season 00",
-		1:   "Season 01",
-		12:  "Season 12",
-		100: "Season 100",
+		0:   "S00",
+		1:   "S01",
+		12:  "S12",
+		100: "S100",
 	}
 	for in, want := range cases {
 		if got := seasonFolderName(in); got != want {
@@ -66,21 +66,59 @@ func TestCurrentMode(t *testing.T) {
 	}
 }
 
-func TestSidecarDir(t *testing.T) {
+func TestFlatSidecarLayout(t *testing.T) {
+	tests := []struct {
+		langs []string
+		want  bool
+	}{
+		{[]string{"all"}, false},
+		{[]string{"th-TH"}, true},
+		{[]string{"th-TH", "en-US"}, true},
+		{nil, true},
+	}
+	for _, tc := range tests {
+		if got := flatSidecarLayout(tc.langs); got != tc.want {
+			t.Fatalf("flatSidecarLayout(%q) = %v, want %v", tc.langs, got, tc.want)
+		}
+	}
+}
+
+func TestSidecarTarget(t *testing.T) {
 	series := t.TempDir()
-	dir, err := sidecarDir(series, "Season 01", "en-US")
+	season := "S01"
+
+	// Folder layout ("all"): <series>/<season>/<locale>/<base>.<ext>
+	path, err := sidecarTarget(series, season, "th-TH", "S02E01 - Foo", "ass", false, false, false)
 	if err != nil {
-		t.Fatalf("sidecarDir() = %v", err)
+		t.Fatalf("sidecarTarget() = %v", err)
 	}
-	want := filepath.Join(series, "Season 01", "en-US")
-	if dir != want {
-		t.Fatalf("sidecarDir() = %q, want %q", dir, want)
+	if want := filepath.Join(series, season, "th-TH", "S02E01 - Foo.ass"); path != want {
+		t.Fatalf("sidecarTarget() folder = %q, want %q", path, want)
 	}
-	info, err := os.Stat(dir)
+	if info, err := os.Stat(filepath.Dir(path)); err != nil || !info.IsDir() {
+		t.Fatalf("sidecarTarget() did not create the locale folder: %v", err)
+	}
+
+	// Flat, single language: no locale in the name.
+	path, err = sidecarTarget(series, season, "th-TH", "S02E01 - Foo", "ass", false, true, false)
 	if err != nil {
-		t.Fatalf("sidecarDir() did not create the directory: %v", err)
+		t.Fatalf("sidecarTarget() = %v", err)
 	}
-	if !info.IsDir() {
-		t.Fatalf("sidecarDir() created %q, which is not a directory", dir)
+	if want := filepath.Join(series, "S02E01 - Foo.ass"); path != want {
+		t.Fatalf("sidecarTarget() flat single = %q, want %q", path, want)
+	}
+
+	// Flat, several languages: locale becomes part of the name.
+	path, err = sidecarTarget(series, season, "en-US", "S02E01 - Foo", "vtt", true, true, true)
+	if err != nil {
+		t.Fatalf("sidecarTarget() = %v", err)
+	}
+	if want := filepath.Join(series, "S02E01 - Foo.en-US [CC].vtt"); path != want {
+		t.Fatalf("sidecarTarget() flat multi = %q, want %q", path, want)
+	}
+
+	// Both flat writes exist without clobbering each other.
+	if path == filepath.Join(series, "S02E01 - Foo [CC].vtt") {
+		t.Fatalf("flat multi name unexpectedly matches the single-language name")
 	}
 }

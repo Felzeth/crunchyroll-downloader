@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // mediaTrack pairs a downloaded temporary file with the locale it represents.
@@ -21,6 +23,19 @@ type subJob struct {
 	format string
 	locale string
 	isCC   bool
+	// flat writes the file into the series folder instead of a per-language
+	// season/locale one; multiLang appends the locale to the file name when
+	// flat so that several languages can't overwrite each other.
+	flat      bool
+	multiLang bool
+}
+
+func findFFmpeg() (string, error) {
+	path, err := exec.LookPath("ffmpeg")
+	if err != nil && !errors.Is(err, exec.ErrDot) {
+		return "", err
+	}
+	return filepath.Abs(path)
 }
 
 // trackTitle returns a human-readable track name for a locale, falling back to
@@ -113,7 +128,11 @@ func mergeEverything(videoFile string, audioTracks, subTracks []mediaTrack, outp
 		outputFile,
 	)
 
-	cmd := exec.Command("ffmpeg", args...)
+	ffmpegPath, err := findFFmpeg()
+	if err != nil {
+		panic(fmt.Sprintf("ffmpeg failed: %s\nInstall FFmpeg and add its directory to PATH", err))
+	}
+	cmd := exec.Command(ffmpegPath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

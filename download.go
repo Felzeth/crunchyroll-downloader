@@ -47,19 +47,27 @@ func currentMode() episodeMode {
 }
 
 // seasonFolderName returns the per-season subdirectory used by -audio-only and
-// -subs-only output, e.g. "Season 01".
+// -subs-only output, e.g. "S01".
 func seasonFolderName(season int) string {
-	return fmt.Sprintf("Season %02d", season)
+	return fmt.Sprintf("S%02d", season)
 }
 
-// episodeBaseName is the "S01E01 - Title" stem shared by the merged MKV and by
-// the per-language files written in -audio-only/-subs-only mode.
+// episodeBaseName is the "S01E01 - Title" stem shared by the merged MKV and
+// by the per-language audio files written in -audio-only mode.
 func episodeBaseName(info EpisodeInfo) string {
 	return fmt.Sprintf("S%02dE%02d - %s",
 		info.EpisodeMetadata.SeasonNumber,
 		info.EpisodeMetadata.EpisodeNumber,
 		sanitizeFilename(info.Title),
 	)
+}
+
+// episodeSubBaseName is the file-name stem for downloaded subtitle/caption
+// files. Unlike the audio tracks, subtitle files carry the series title so a
+// folder of episodes stays identifiable on its own, e.g.
+// "Kaiju No. 8 S01E01 - The Man Who Became a Kaiju.ass".
+func episodeSubBaseName(info EpisodeInfo) string {
+	return sanitizeFilename(info.EpisodeMetadata.SeriesTitle) + " " + episodeBaseName(info)
 }
 
 // sidecarDir returns (and creates) the per-language output folder used by the
@@ -80,6 +88,49 @@ func sidecarName(baseName, ext string, isCC bool) string {
 		suffix = " [CC]"
 	}
 	return baseName + suffix + "." + ext
+}
+
+// subtitleExt returns the file extension for a downloaded subtitle/caption.
+// Translation scripts arrive as ASS and are saved as-is; closed captions
+// arrive as WebVTT and are converted to SRT, which is more widely supported
+// and matches what the merge step produces for MKV output.
+func subtitleExt(format string) string {
+	if format == "vtt" {
+		return "srt"
+	}
+	return format
+}
+
+// flatSidecarLayout decides whether per-language sidecar files are written
+// into per-language season/locale folders or flat into the series folder.
+// Requesting every available language ("all") keeps the folder structure;
+// naming one or a few specific languages keeps the files directly in the
+// series folder.
+func flatSidecarLayout(langs []string) bool {
+	return !(len(langs) == 1 && langs[0] == "all")
+}
+
+// sidecarTarget returns (and creates) the output directory for one sidecar
+// track and the full path to write it at. With flat layout the season and
+// locale folders are skipped and the locale becomes part of the file name only
+// when several languages are saved at once, so the files can't overwrite each
+// other.
+func sidecarTarget(series, seasonFolder, locale, baseName, ext string, isCC, flat, multiLang bool) (string, error) {
+	name := baseName
+	if flat {
+		if multiLang {
+			name += "." + locale
+		}
+		if err := os.MkdirAll(series, 0777); err != nil {
+			return "", err
+		}
+		return filepath.Join(series, sidecarName(name, ext, isCC)), nil
+	}
+	dir, err := sidecarDir(series, seasonFolder, locale)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, sidecarName(baseName, ext, isCC)), nil
 }
 
 func buildUrl(base, representationId, file string, partNum *int64) string {
@@ -490,6 +541,13 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		audioLangs = []string{"all"}
 	}
 
+	// Capture the flat-vs-folders layout decision before the "all" keyword is
+	// expanded into the concrete language lists below: "all" keeps the
+	// per-language season/locale folders, specific languages are written flat
+	// into the series folder.
+	audioFlat := mode == modeAudioOnly && flatSidecarLayout(audioLangs)
+	subsFlat, ccFlat := flatSidecarLayout(subsLangs), flatSidecarLayout(ccLangs)
+
 	cleanSeriesTitle := sanitizeFilename(info.EpisodeMetadata.SeriesTitle)
 	cleanEpisodeTitle := sanitizeFilename(info.Title)
 
@@ -609,7 +667,10 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	for i, version := range versions {
 		// In audio-only mode a track already on disk needs no re-download.
 		if mode == modeAudioOnly {
-			target := filepath.Join(cleanSeriesTitle, seasonFolder, version.locale, baseName+"."+audioTrackExt)
+			target, err := sidecarTarget(cleanSeriesTitle, seasonFolder, version.locale, baseName, audioTrackExt, false, audioFlat, len(audioLangs) > 1)
+			if err != nil {
+				panic(err)
+			}
 			if fileExists(target) {
 				fmt.Printf("Audio track %s is already downloaded, skipping...\n", trackTitle(version.locale))
 				continue
@@ -721,21 +782,23 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		subsLangs = filterAvailableLangs(subsLangs, subtitles, "Subtitle", info.EpisodeMetadata.EpisodeNumber)
 		ccLangs = filterAvailableLangs(ccLangs, captions, "Closed caption", info.EpisodeMetadata.EpisodeNumber)
 
-		// Build the list of subtitle and caption downloads.
+		// Build the list of subtitle and caption downloads. Subtitles and
+		// captions each follow their own language list, with the layout decided
+		// up front from the requested (pre-expansion) lists.
 		for _, locale := range subsLangs {
 			sub := subtitles[locale]
-			subJobs = append(subJobs, subJob{url: sub.URL, format: sub.Format, locale: locale})
+			subJobs = append(subJobs, subJob{url: sub.URL, format: sub.Format, locale: locale, flat: subsFlat, multiLang: len(subsLangs) > 1})
 		}
 		for _, locale := range ccLangs {
 			cc := captions[locale]
-			subJobs = append(subJobs, subJob{url: cc.URL, format: cc.Format, locale: locale, isCC: true})
+			subJobs = append(subJobs, subJob{url: cc.URL, format: cc.Format, locale: locale, isCC: true, flat: ccFlat, multiLang: len(ccLangs) > 1})
 		}
 	}
 
-	// Subtitles-only mode writes each file straight into its per-language
-	// folder and never touches the video or audio streams.
+	// Subtitles-only mode writes each file straight into its output layout
+	// and never touches the video or audio streams.
 	if mode == modeSubsOnly {
-		return downloadSubsOnly(cleanSeriesTitle, seasonFolder, baseName, subJobs)
+		return downloadSubsOnly(cleanSeriesTitle, seasonFolder, episodeSubBaseName(info), subJobs)
 	}
 
 	// Subtitles are fetched from the CDN over their own URLs rather than through
@@ -781,10 +844,10 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 			if track.file == "" {
 				continue // skipped above: already on disk
 			}
-			if _, err := sidecarDir(cleanSeriesTitle, seasonFolder, track.locale); err != nil {
+			target, err := sidecarTarget(cleanSeriesTitle, seasonFolder, track.locale, baseName, audioTrackExt, false, audioFlat, len(audioLangs) > 1)
+			if err != nil {
 				panic(err)
 			}
-			target := filepath.Join(cleanSeriesTitle, seasonFolder, track.locale, baseName+"."+audioTrackExt)
 			if err := moveFile(track.file, target); err != nil {
 				panic(fmt.Errorf("writing %s: %w", target, err))
 			}
@@ -802,19 +865,20 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	return nil
 }
 
-// downloadSubsOnly writes each subtitle/caption file straight into its
-// per-language folder: <series>/<season>/<locale>/<SxxEyy - Title>.<format>.
+// downloadSubsOnly writes each subtitle/caption file flat into the series
+// folder when specific languages were requested, or into its per-language
+// season/locale folder for "all":
+// <series>/[S<nn>/<locale>/]<series> SxxEyy - <title>[.<locale>][ [CC]].<format>.
 func downloadSubsOnly(series, seasonFolder, baseName string, jobs []subJob) error {
 	for _, job := range jobs {
 		kind := "Subtitle"
 		if job.isCC {
 			kind = "Closed caption"
 		}
-		dir, err := sidecarDir(series, seasonFolder, job.locale)
+		target, err := sidecarTarget(series, seasonFolder, job.locale, baseName, subtitleExt(job.format), job.isCC, job.flat, job.multiLang)
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(dir, sidecarName(baseName, job.format, job.isCC))
 		if fileExists(target) {
 			fmt.Printf("%s %s is already downloaded, skipping...\n", kind, trackTitle(job.locale))
 			continue
@@ -823,6 +887,9 @@ func downloadSubsOnly(series, seasonFolder, baseName string, jobs []subJob) erro
 		body, err := fetchSubtitle(job.url)
 		if err != nil {
 			return fmt.Errorf("downloading %s for %s: %w", strings.ToLower(kind), trackTitle(job.locale), err)
+		}
+		if job.format == "vtt" {
+			body = vttToSrt(body)
 		}
 		if err := os.WriteFile(target, body, 0666); err != nil {
 			return fmt.Errorf("writing %s: %w", target, err)
