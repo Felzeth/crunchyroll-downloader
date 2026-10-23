@@ -186,6 +186,10 @@ ffmpeg -i "REPLACE_WITH_YOUR.mkv" -itsoffset -8.889 -i "REPLACE_WITH_YOUR.mkv" -
 
 Crunchyroll counts every playback request as one active stream, and an account is only allowed a few at once. The downloader opens, uses and closes a single stream at a time and retries on its own when the limit is hit, so this should be rare now. It still happens when something else is holding your allowance: stop playback in other browser tabs, in the Crunchyroll app, and on other devices. A run stopped with Ctrl+C is cleaned up too (its stream is released), but streams stranded by _older_ versions keep counting until they expire — wait a few minutes, or space downloads out with `--download-delay`, and it clears.
 
+### Why does FFmpeg fail with `cannot run executable found relative to current directory`?
+
+Go refuses to run a program that was found relative to the working directory. On Windows the lookup checks the current directory _before_ `PATH`, so an `ffmpeg.exe` sitting next to the downloader is found as just `ffmpeg` — even when `where ffmpeg` prints a correct absolute path — and the merge step is blocked. The downloader now resolves FFmpeg to an absolute path itself (searching its own folder, then the absolute entries of `PATH`), so it is immune to this. On an older build, either run it from a folder that has no `ffmpeg.exe` in it, or remove the copy in the downloader's folder and rely on `PATH`.
+
 ### What is a `.wvd` file and do I really need one?
 
 Yes, Crunchyroll uses DRM-only content. This file is used to get a Widevine license, which gives the keys to decrypt the media.

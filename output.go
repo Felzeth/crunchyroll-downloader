@@ -2,11 +2,12 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 // mediaTrack pairs a downloaded temporary file with the locale it represents.
@@ -30,12 +31,75 @@ type subJob struct {
 	multiLang bool
 }
 
-func findFFmpeg() (string, error) {
-	path, err := exec.LookPath("ffmpeg")
-	if err != nil && !errors.Is(err, exec.ErrDot) {
-		return "", err
+// ffmpegNames lists the executable names to look for, in preference order.
+func ffmpegNames() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"ffmpeg.exe", "ffmpeg.cmd", "ffmpeg.bat"}
 	}
-	return filepath.Abs(path)
+	return []string{"ffmpeg"}
+}
+
+// ffmpegSearchDirs returns the absolute directories to search for ffmpeg: the
+// directory holding this executable first (so an ffmpeg sitting next to the
+// downloader is found), then every absolute PATH entry.
+//
+// Relative PATH entries ("" and ".") are skipped deliberately. On Windows, Go's
+// exec.LookPath consults the working directory before PATH and refuses to run
+// what it finds there (exec.ErrDot), so an ffmpeg.exe in the current directory
+// breaks the merge even when ffmpeg is correctly installed on PATH. Building
+// absolute paths ourselves sidesteps that entirely.
+func ffmpegSearchDirs() []string {
+	var dirs []string
+	seen := make(map[string]bool)
+	add := func(dir string) {
+		dir = strings.Trim(dir, `"`)
+		if dir == "" || !filepath.IsAbs(dir) {
+			return
+		}
+		dir = filepath.Clean(dir)
+		key := dir
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		dirs = append(dirs, dir)
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		add(filepath.Dir(exe))
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		add(dir)
+	}
+	return dirs
+}
+
+// findFFmpegIn returns the ffmpeg executable found in the first directory that
+// has one, as an absolute path.
+func findFFmpegIn(dirs []string) (string, error) {
+	for _, dir := range dirs {
+		// Never resolve against a relative directory: the result would depend
+		// on the working directory, which is exactly what exec.ErrDot forbids.
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		for _, name := range ffmpegNames() {
+			candidate := filepath.Join(dir, name)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("ffmpeg not found in PATH")
+}
+
+// findFFmpeg resolves ffmpeg to an absolute path before it is executed, so the
+// working directory can never influence which binary runs.
+func findFFmpeg() (string, error) {
+	return findFFmpegIn(ffmpegSearchDirs())
 }
 
 // trackTitle returns a human-readable track name for a locale, falling back to

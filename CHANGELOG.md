@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.2
+
+- `--audio-only` and `--subs-only` with specific languages now write flat into the series folder (`<series>/S02E01 - Title.ass`), with the locale appended to the file name only when several languages are requested; requesting `all` keeps one folder per language under the season folder
+- Subtitle files are now named `<series title> SxxEyy - <episode title>`, e.g. `Kaiju No. 8 S02E01 - The Man Who Became a Kaiju.ass`
+- Closed captions (WebVTT) saved by `--subs-only` are converted to `.srt` instead of being written as raw `.vtt`; translation scripts stay `.ass`
+- The per-season folder used by those modes is now named `S01` instead of `Season 01`
+- Fixed `ffmpeg failed: exec: "ffmpeg": cannot run executable found relative to current directory` on Windows: FFmpeg is now resolved to an absolute path (its own folder first, then the absolute `PATH` entries) instead of relying on `exec.LookPath`, which checks the working directory before `PATH` and then refuses to run what it finds there
+
 ## 1.6.1
 
 - Fixed `TOO_MANY_ACTIVE_STREAMS` failures: every playback request counts as an active stream, and the previous code requested playback for all of an episode's dubs up front and held those tokens until the episode finished, so a multi-language download (notably `--subs-only`, which inspects every dub to find per-dub captions) exceeded the account's concurrent-stream limit. Playback streams are now acquired, used and released one version at a time
